@@ -1,0 +1,215 @@
+#Security Policy Configuration
+
+function Security-Policy {
+    # Set password policy
+    secedit /export /cfg C:\SecConfig.cfg
+    (Get-Content C:\SecConfig.cfg).replace("MinimumPasswordLength = 0", "MinimumPasswordLength = 12") | Set-Content C:\SecConfig.cfg
+    (Get-Content C:\SecConfig.cfg).replace("MaximumPasswordAge = 42", "MaximumPasswordAge = 30") | Set-Content C:\SecConfig.cfg
+    (Get-Content C:\SecConfig.cfg).replace("PasswordComplexity = 0", "PasswordComplexity = 1") | Set-Content C:\SecConfig.cfg
+    secedit /configure /db secedit.sdb /cfg C:\SecConfig.cfg
+
+    # Set account lockout policy
+    (Get-Content C:\SecConfig.cfg).replace("LockoutBadCount = 0", "LockoutBadCount = 5") | Set-Content C:\SecConfig.cfg
+    (Get-Content C:\SecConfig.cfg).replace("ResetLockoutCount = 30", "ResetLockoutCount = 15") | Set-Content C:\SecConfig.cfg
+    (Get-Content C:\SecConfig.cfg).replace("LockoutDuration = 30", "LockoutDuration = 15") | Set-Content C:\SecConfig.cfg
+    secedit /configure /db secedit.sdb /cfg C:\SecConfig.cfg
+
+    # Set user rights assignment
+    (Get-Content C:\SecConfig.cfg).replace("SeDenyInteractiveLogonRight = ", "SeDenyInteractiveLogonRight = *S-1-5-32-546") | Set-Content C:\SecConfig.cfg
+    secedit /configure /db secedit.sdb /cfg C:\SecConfig.cfg
+
+    # Set audit policy
+    Auditpol.exe /set /subcategory:"Logon" /success:enable /failure:enable
+    Auditpol.exe /set /subcategory:"Credential Validation" /success:enable /failure:enable
+}
+
+
+
+
+# Function to configure the firewall
+function Configure-Firewall {
+    Write-Output "Configuring firewall rules"
+
+    # Clear existing rules
+    Write-Output "Clearing existing firewall rules"
+    Get-NetFirewallRule | Remove-NetFirewallRule
+
+    # Block all incoming and outgoing connections by default
+    Write-Output "Blocking all incoming and outgoing connections by default"
+    Set-NetFirewallProfile -Profile Domain,Public,Private -DefaultInboundAction Block -DefaultOutboundAction Block
+
+     # Detect active connections and allow them
+    $activeConnections = Get-NetTCPConnection | Select-Object -Property LocalPort, State | Where-Object { $_.State -eq 'Established' }
+
+    foreach ($connection in $activeConnections) {
+        New-NetFirewallRule -DisplayName "Allow Active Connection on Port $($connection.LocalPort)" -Direction Outbound -Protocol TCP -LocalPort $connection.LocalPort -Action Allow
+    }
+
+    # Enable firewall logging (Optional)
+     Write-Output "Enabling firewall logging"
+     Set-NetFirewallProfile -Profile Domain,Public,Private -LogAllowed True -LogBlocked True -LogFileName "C:\Windows\System32\LogFiles\Firewall\pfirewall.log" -LogMaxSizeKilobytes 32767
+
+    # Allow necessary inbound connections
+    Write-Output "Allowing necessary inbound connections"
+
+    # Remote Desktop Protocol (RDP)
+    New-NetFirewallRule -DisplayName "Allow RDP" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow
+
+    # Hypertext Transfer Protocol Secure (HTTPS)
+    New-NetFirewallRule -DisplayName "Allow HTTPS" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow
+
+    # Domain Name System (DNS)
+    New-NetFirewallRule -DisplayName "Allow DNS" -Direction Inbound -Protocol UDP -LocalPort 53 -Action Allow
+
+    # Server Message Block (SMB) - internal use only
+    New-NetFirewallRule -DisplayName "Allow SMB" -Direction Inbound -Protocol TCP -LocalPort 445 -Action Allow -Profile Domain
+
+    # Simple Mail Transfer Protocol (SMTP)
+    New-NetFirewallRule -DisplayName "Allow SMTP" -Direction Inbound -Protocol TCP -LocalPort 25 -Action Allow
+
+    # File Transfer Protocol (FTP) Control
+    New-NetFirewallRule -DisplayName "Allow FTP Control" -Direction Inbound -Protocol TCP -LocalPort 21 -Action Allow
+
+    # File Transfer Protocol (FTP) Data
+    New-NetFirewallRule -DisplayName "Allow FTP Data" -Direction Inbound -Protocol TCP -LocalPort 20 -Action Allow
+
+    # Allow DHCP Client (incoming responses from the DHCP server)
+    New-NetFirewallRule -DisplayName "Allow DHCP Client" -Direction Inbound -Protocol UDP -LocalPort 68 -Action Allow
+
+    # Allow NTP Inbound (if needed, for responses from NTP servers)
+    New-NetFirewallRule -DisplayName "Allow NTP" -Direction Inbound -Protocol UDP -LocalPort 123 -Action Allow
+
+    # Allow necessary outbound connections
+    Write-Output "Allowing necessary outbound connections"
+
+    # Outbound DNS
+    New-NetFirewallRule -DisplayName "Allow Outbound DNS" -Direction Outbound -Protocol UDP -RemotePort 53 -Action Allow
+
+    # Outbound HTTPS
+    New-NetFirewallRule -DisplayName "Allow Outbound HTTPS" -Direction Outbound -Protocol TCP -RemotePort 443 -Action Allow
+
+    # Outbound SMTP
+    New-NetFirewallRule -DisplayName "Allow Outbound SMTP" -Direction Outbound -Protocol TCP -RemotePort 25 -Action Allow
+
+    # Outbound FTP Control
+    New-NetFirewallRule -DisplayName "Allow Outbound FTP Control" -Direction Outbound -Protocol TCP -RemotePort 21 -Action Allow
+
+    # Outbound FTP Data
+    New-NetFirewallRule -DisplayName "Allow Outbound FTP Data" -Direction Outbound -Protocol TCP -RemotePort 20 -Action Allow
+
+    # Allow DHCP Client (outgoing requests to the DHCP server)
+    New-NetFirewallRule -DisplayName "Allow DHCP Client Outbound" -Direction Outbound -Protocol UDP -RemotePort 67 -Action Allow
+
+    # Allow NTP Outbound (to communicate with NTP servers)
+    New-NetFirewallRule -DisplayName "Allow NTP Outbound" -Direction Outbound -Protocol UDP -RemotePort 123 -Action Allow
+
+    # Allow inbound and outbound traffic for Ethernet and Wi-Fi interfaces
+    New-NetFirewallRule -DisplayName "Allow Inbound Ethernet" -Direction Inbound -InterfaceType Wired -Action Allow
+    New-NetFirewallRule -DisplayName "Allow Outbound Ethernet" -Direction Outbound -InterfaceType Wired -Action Allow
+
+    New-NetFirewallRule -DisplayName "Allow Inbound Wireless" -Direction Inbound -InterfaceType Wireless -Action Allow
+    New-NetFirewallRule -DisplayName "Allow Outbound Wireless" -Direction Outbound -InterfaceType Wireless -Action Allow
+
+    Write-Output "Firewall configuration completed"
+}
+
+
+
+
+#IDS SCRIPT
+
+# Define the path for the log file
+$logFilePath = "C:\Logs\SuspiciousActivities.log"
+
+# Ensure the log directory exists
+$logDir = Split-Path -Path $logFilePath -Parent
+if (-not (Test-Path -Path $logDir)) {
+    Write-Output "Creating log directory at $logDir"
+    New-Item -Path $logDir -ItemType Directory -Force
+}
+
+# Function to log messages to the log file
+function Log-Message {
+    param (
+        [string]$Message
+    )
+    $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    $logEntry = "$timestamp - $Message"
+    Add-Content -Path $logFilePath -Value $logEntry
+}
+
+# Check for suspicious processes
+function Check-SuspiciousProcesses {
+    Write-Output "Checking for suspicious processes..."
+    $suspiciousProcesses = @()
+    
+    # Define criteria for suspicious processes (example: processes running with high CPU usage)
+    $highCpuUsageThreshold = 80
+    
+    $processes = Get-Process
+    foreach ($process in $processes) {
+        if ($process.CPU -gt $highCpuUsageThreshold) {
+            $suspiciousProcesses += $process
+            Log-Message -Message "Suspicious process detected: $($process.Name) (PID: $($process.Id), CPU Usage: $($process.CPU))"
+        }
+    
+    
+        if ($suspiciousProcesses.Count -eq 0) {
+        Log-Message -Message "No suspicious processes detected."
+        }
+    }
+}
+
+# Check for failed login attempts
+function Check-FailedLoginAttempts {
+    Write-Output "Checking for failed login attempts..."
+    $failedLogins = @()
+    
+    # Check the Security event log for failed login attempts (Event ID 4625)
+    $eventLogEntries = Get-WinEvent -LogName Security | Where-Object { $_.Id -eq 4625 }
+    foreach ($entry in $eventLogEntries) {
+        $message = $entry.Message
+        $failedLogins += $message
+        Log-Message -Message "Failed login attempt detected: $message"
+    }
+    
+    if ($failedLogins.Count -eq 0) {
+        Log-Message -Message "No failed login attempts detected."
+    }
+}
+
+
+
+#Windows Server Update Script
+function Windows-Update {
+    try {
+        Write-Output "Installing updates..."
+        # Using PSWindowsUpdate module to download and install updates
+        Install-WindowsUpdate -AcceptAll -AutoReboot
+        Write-Log "Updates installation completed successfully."
+    } catch {
+        Write-Log "Updates installation failed: $_"
+    }
+}
+
+
+
+
+#Security Policy execution
+Write-Output "Starting Secuirty Policy Configuration Script"
+Security-Policy
+
+# Main script execution
+Write-Output "Starting firewall configuration script"
+Configure-Firewall
+
+
+#Run the IDS Scripts
+Check-SuspiciousProcesses
+Check-FailedLoginAttempts
+Write-Output "Log entries have been recorded in $logFilePath."
+
+
+#Windows Update execution
+Write-Output "Starting Windows Update Script"
+Windows-Update
